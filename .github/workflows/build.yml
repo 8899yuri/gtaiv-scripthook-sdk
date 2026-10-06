@@ -1,30 +1,340 @@
-name: Build TGHMod ASI
+name: Build TGHMod
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - "**"
+  pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2019
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout TGHMod
+        uses: actions/checkout@v4
 
-    - name: Setup MSVC
-      uses: ilammy/msvc-dev-cmd@v1
-      with:
-        arch: x86
+      - name: Checkout ScriptHook SDK
+        shell: pwsh
+        run: |
+          if (Test-Path "ScriptHook.sln") {
+              Write-Host "ScriptHook SDK already exists in repository."
+          }
+          elseif (Test-Path "_ScriptHookSDK\ScriptHook.sln") {
+              Write-Host "ScriptHook SDK already exists in _ScriptHookSDK."
+          }
+          else {
+              git clone --depth 1 https://github.com/violetfrost/gtaiv-scripthook-sdk.git _ScriptHookSDK
+          }
 
-    - name: Compile TGHMod.cpp
-      shell: cmd
-      run: |
-        cl /LD /EHsc /I. /IScriptHook /Fe:TGHMod.dll TGHMod.cpp ScriptHook.lib /link /OUT:TGHMod.dll
+      - name: Locate ScriptHook SDK
+        shell: pwsh
+        run: |
+          $sdk = $null
 
-    - name: Upload ASI Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: TGHMod-asi
-        path: TGHMod.dll
+          if (Test-Path "ScriptHook.sln") {
+              $sdk = (Get-Location).Path
+          }
+          elseif (Test-Path "_ScriptHookSDK\ScriptHook.sln") {
+              $sdk = (Resolve-Path "_ScriptHookSDK").Path
+          }
+
+          if ($null -eq $sdk) {
+              Write-Error "ScriptHook.sln was not found."
+              exit 1
+          }
+
+          "SCRIPTHOOK_SDK=$sdk" >> $env:GITHUB_ENV
+
+          Write-Host "ScriptHook SDK: $sdk"
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x86
+
+      - name: Build ScriptHook SDK
+        shell: pwsh
+        run: |
+          & msbuild "$env:SCRIPTHOOK_SDK\ScriptHook.sln" `
+            /m `
+            /t:Build `
+            /p:Configuration=Release `
+            /p:Platform=Win32 `
+            /p:PreferredToolArchitecture=x86 `
+            /verbosity:minimal
+
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "ScriptHook SDK build failed."
+              exit $LASTEXITCODE
+          }
+
+      - name: Find ScriptHook.lib
+        shell: pwsh
+        run: |
+          $libs = Get-ChildItem `
+            -Path "$env:SCRIPTHOOK_SDK" `
+            -Filter "ScriptHook.lib" `
+            -Recurse `
+            -File
+
+          if ($libs.Count -eq 0) {
+              Write-Error "ScriptHook.lib was not generated."
+              Write-Host "Available LIB files:"
+              Get-ChildItem `
+                -Path "$env:SCRIPTHOOK_SDK" `
+                -Filter "*.lib" `
+                -Recurse `
+                -File |
+                Select-Object FullName
+              exit 1
+          }
+
+          $releaseLib = $libs |
+            Where-Object { $_.FullName -match "\\Release\\" } |
+            Select-Object -First 1
+
+          if ($null -eq $releaseLib) {
+              $releaseLib = $libs | Select-Object -First 1
+          }
+
+          "SCRIPTHOOK_LIB=$($releaseLib.FullName)" >> $env:GITHUB_ENV
+
+          Write-Host "Using ScriptHook.lib:"
+          Write-Host $releaseLib.FullName
+
+      - name: Locate TGHMod source files
+        shell: pwsh
+        run: |
+          $cpp = Get-ChildItem `
+            -Path . `
+            -Filter "TGHMod.cpp" `
+            -Recurse `
+            -File |
+            Select-Object -First 1
+
+          $customHeader = Get-ChildItem `
+            -Path . `
+            -Filter "CustomThread.h" `
+            -Recurse `
+            -File |
+            Select-Object -First 1
+
+          if ($null -eq $cpp) {
+              Write-Error "TGHMod.cpp not found."
+              exit 1
+          }
+
+          if ($null -eq $customHeader) {
+              Write-Error "CustomThread.h not found."
+              exit 1
+          }
+
+          "TGHMOD_SOURCE_DIR=$($cpp.DirectoryName)" >> $env:GITHUB_ENV
+          "CUSTOMTHREAD_HEADER=$($customHeader.FullName)" >> $env:GITHUB_ENV
+
+          Write-Host "TGHMod.cpp: $($cpp.FullName)"
+          Write-Host "CustomThread.h: $($customHeader.FullName)"
+
+      - name: Generate TGHMod.vcxproj
+        shell: pwsh
+        run: |
+          $sourceDir = $env:TGHMOD_SOURCE_DIR
+          $cpp = Join-Path $sourceDir "TGHMod.cpp"
+          $header = $env:CUSTOMTHREAD_HEADER
+          $sdk = $env:SCRIPTHOOK_SDK
+          $libDir = Split-Path $env:SCRIPTHOOK_LIB -Parent
+
+          $includeDirs = @(
+              $sourceDir
+              $sdk
+              (Join-Path $sdk "ScriptHook")
+          )
+
+          $includeText = (
+              $includeDirs |
+              ForEach-Object {
+                  "&quot;$($_)&quot;"
+              }
+          ) -join ";"
+
+          $project = @"
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build"
+         xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{D2A4B4F4-5B6C-4E58-9D74-000000000001}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>TGHMod</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+
+  <Import Project="`$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Condition="'`$(Configuration)|`$(Platform)'=='Release|Win32'"
+                Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v142</PlatformToolset>
+    <CharacterSet>MultiByte</CharacterSet>
+  </PropertyGroup>
+
+  <Import Project="`$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="Shared" />
+
+  <ImportGroup Label="PropertySheets"
+               Condition="'`$(Configuration)|`$(Platform)'=='Release|Win32'">
+    <Import Project="`$(UserRootDir)\Microsoft.Cpp.`$(Platform).user.props"
+            Condition="exists('`$(UserRootDir)\Microsoft.Cpp.`$(Platform).user.props')"
+            Label="LocalAppDataPlatform" />
+  </ImportGroup>
+
+  <PropertyGroup Label="UserMacros" />
+
+  <PropertyGroup Condition="'`$(Configuration)|`$(Platform)'=='Release|Win32'">
+    <OutDir>`$(SolutionDir)build\</OutDir>
+    <IntDir>`$(SolutionDir)build\obj\</IntDir>
+    <LinkIncremental>false</LinkIncremental>
+    <TargetName>TGHMod</TargetName>
+    <TargetExt>.dll</TargetExt>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup Condition="'`$(Configuration)|`$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <PreprocessorDefinitions>
+        WIN32;
+        _WINDOWS;
+        NDEBUG;
+        _CRT_SECURE_NO_WARNINGS;
+        %(PreprocessorDefinitions)
+      </PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>
+        $includeText;
+        %(AdditionalIncludeDirectories)
+      </AdditionalIncludeDirectories>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <LanguageStandard>stdcpp14</LanguageStandard>
+    </ClCompile>
+
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <AdditionalLibraryDirectories>
+        &quot;$libDir&quot;;
+        %(AdditionalLibraryDirectories)
+      </AdditionalLibraryDirectories>
+      <AdditionalDependencies>
+        ScriptHook.lib;
+        user32.lib;
+        kernel32.lib;
+        %(AdditionalDependencies)
+      </AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <ClCompile Include="$cpp" />
+    <ClInclude Include="$header" />
+  </ItemGroup>
+
+  <Import Project="`$(VCTargetsPath)\Microsoft.Cpp.targets" />
+
+</Project>
+"@
+
+          $project = $project.Replace('`$', '$')
+
+          Set-Content `
+            -Path "TGHMod.vcxproj" `
+            -Value $project `
+            -Encoding UTF8
+
+          Write-Host "Generated TGHMod.vcxproj"
+
+      - name: Build TGHMod
+        shell: pwsh
+        run: |
+          & msbuild "TGHMod.vcxproj" `
+            /m `
+            /t:Rebuild `
+            /p:Configuration=Release `
+            /p:Platform=Win32 `
+            /p:PreferredToolArchitecture=x86 `
+            /verbosity:minimal
+
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "TGHMod compilation failed."
+              exit $LASTEXITCODE
+          }
+
+      - name: Create TGHMod.asi
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem `
+            -Path . `
+            -Filter "TGHMod.dll" `
+            -Recurse `
+            -File |
+            Select-Object -First 1
+
+          if ($null -eq $dll) {
+              Write-Error "TGHMod.dll was not generated."
+              exit 1
+          }
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path "dist" |
+            Out-Null
+
+          Copy-Item `
+            $dll.FullName `
+            "dist\TGHMod.asi" `
+            -Force
+
+          Write-Host "Generated dist\TGHMod.asi"
+
+      - name: Verify ASI
+        shell: pwsh
+        run: |
+          $asi = "dist\TGHMod.asi"
+
+          if (!(Test-Path $asi)) {
+              Write-Error "TGHMod.asi does not exist."
+              exit 1
+          }
+
+          $size = (Get-Item $asi).Length
+
+          if ($size -lt 4096) {
+              Write-Error "TGHMod.asi is suspiciously small: $size bytes"
+              exit 1
+          }
+
+          Write-Host "TGHMod.asi size: $size bytes"
+
+      - name: Upload TGHMod ASI
+        uses: actions/upload-artifact@v4
+        with:
+          name: TGHMod-ASI
+          path: dist/TGHMod.asi
+          if-no-files-found: error
