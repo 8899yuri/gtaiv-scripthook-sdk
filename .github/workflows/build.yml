@@ -1,7 +1,5 @@
 name: Build TGHMod
-
-on:
-  workflow_dispatch:
+on: workflow_dispatch
 
 jobs:
   build:
@@ -11,37 +9,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
-
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x86
 
-      - name: Build ScriptHook
+      - name: Download Full SDK
         run: |
-          msbuild ScriptHook.sln /t:ScriptHook /p:Configuration=Release /p:Platform=Win32
+          git clone https://github.com/FoulPlay/GTAIVScriptHook_0.4.0_SDK.git SDK
 
-      - name: Build TGHMod
-        shell: cmd
+      - name: Compile SDK to get lib
         run: |
-          cl /nologo /LD /EHsc /O2 /MT TGHMod.cpp /I ScriptHook /link Release\ScriptHook.lib /OUT:TGHMod.dll
+          cd SDK
+          msbuild ScriptHook.sln /p:Configuration=Release /p:Platform=Win32
+          cd ..
+
+      - name: Compile TGHMod
+        run: |
+          cl /LD /EHsc /O2 /MT /I. /IScriptHook TGHMod.cpp /link SDK\Release\ScriptHook.lib /OUT:TGHMod.dll
 
       - name: Make ASI
-        shell: cmd
-        run: |
-          copy /Y TGHMod.dll TGHMod.asi
+        run: copy /Y TGHMod.dll TGHMod.asi
 
-      - name: Prepare Runtime Files
-        shell: cmd
-        run: |
-          mkdir Runtime
-          copy /Y Release\ScriptHook.dll Runtime\ScriptHook.dll
-          copy /Y TGHMod.asi Runtime\TGHMod.asi
-
-      - name: Upload TGHMod
+      - name: Upload ASI
         uses: actions/upload-artifact@v4
         with:
-          name: TGHMod-Complete
-          path: Runtime
+          name: TGHMod-ASI
+          path: TGHMod.asi
