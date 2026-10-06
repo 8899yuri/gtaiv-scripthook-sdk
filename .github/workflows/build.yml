@@ -14,21 +14,13 @@ jobs:
         with:
           arch: x86
 
-      # 1. 自动去网上下载一个原版的ScriptHook.dll (0.4.0)
-      - name: Download ScriptHook.dll
-        shell: powershell
-        run: |
-          Invoke-WebRequest -Uri "https://github.com/FoulPlay/GTAIVScriptHook_0.4.0_SDK/raw/main/ScriptHook.dll" -OutFile "ScriptHook.dll"
-
-      # 2. 用 dumpbin 导出函数名，再用 lib 生成 .lib 文件（跳过损坏的.sln！）
-      - name: Generate ScriptHook.lib
+      - name: Generate ScriptHook.lib from local DLL
         shell: cmd
         run: |
           dumpbin /exports ScriptHook.dll > ScriptHook.def
           powershell -Command "(Get-Content ScriptHook.def) | Select-Object -Skip 19 | Set-Content ScriptHook.def"
           lib /def:ScriptHook.def /out:ScriptHook.lib /machine:x86
 
-      # 3. 用生成的 .lib 编译你的 TGHMod
       - name: Compile TGHMod
         shell: cmd
         run: |
