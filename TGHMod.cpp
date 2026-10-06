@@ -1,370 +1,457 @@
-#include "CustomThread.h"
-
-#include "../ScriptHook/Scripting.h"
-#include "../ScriptHook/Log.h"
-
 #include <windows.h>
-#include <math.h>
+#include <cmath>
+
+#include "ScriptThread.h"
+#include "Scripting.h"
+#include "ScriptHookManager.h"
 
 using namespace Scripting;
 
-namespace
+class TGHThread : public ScriptThread
 {
-    static const int KEY_SPIRIT  = 'T';
-    static const int KEY_POSSESS = 'G';
-    static const int KEY_RETURN  = 'H';
-
-    static const int KEY_FORWARD = 'W';
-    static const int KEY_BACK    = 'S';
-    static const int KEY_LEFT    = 'A';
-    static const int KEY_RIGHT   = 'D';
-    static const int KEY_RUN     = VK_SHIFT;
-
-    enum TGHMode
+private:
+    enum Mode
     {
-        TGH_NORMAL = 0,
-        TGH_SPIRIT,
-        TGH_POSSESSED
+        MODE_NIKO = 0,
+        MODE_SPIRIT,
+        MODE_POSSESSED
     };
 
-    static TGHMode g_Mode = TGH_NORMAL;
+    Mode m_Mode;
 
-    static Ped g_Niko = {};
-    static Ped g_PossessedPed = {};
+    Player m_Player;
+    Ped m_Niko;
+    Ped m_Target;
+    Camera m_Camera;
 
-    static Camera g_SpiritCamera = {};
-    static bool g_SpiritCameraCreated = false;
+    f32 m_SpiritYaw;
+    f32 m_SpiritPitch;
 
-    static f32 g_SpiritX = 0.0f;
-    static f32 g_SpiritY = 0.0f;
-    static f32 g_SpiritZ = 0.0f;
-    static f32 g_SpiritYaw = 0.0f;
+    u32 m_RagdollEndTime;
 
-    static DWORD g_RagdollEndTime = 0;
+    bool m_CameraCreated;
 
-    static bool IsKeyJustPressed(int key)
+public:
+    TGHThread()
     {
-        return (GetAsyncKeyState(key) & 1) != 0;
+        char name[] = "TGHThread";
+        SetName(name);
+
+        m_Mode = MODE_NIKO;
+
+        m_Player = 0;
+        m_Niko = {};
+        m_Target = {};
+        m_Camera = {};
+
+        m_SpiritYaw = 0.0f;
+        m_SpiritPitch = -25.0f;
+
+        m_RagdollEndTime = 0;
+        m_CameraCreated = false;
     }
 
-    static bool IsKeyPressed(int key)
+    virtual ~TGHThread()
     {
-        return (GetAsyncKeyState(key) & 0x8000) != 0;
     }
 
-    static bool IsPedUsable(Ped ped)
+protected:
+
+    virtual void RunTick()
     {
-        if (ped.IsNull())
-            return false;
-
-        if (!DoesCharExist(ped))
-            return false;
-
-        if (IsCharDead(ped))
-            return false;
-
-        return true;
-    }
-
-    static void GetNiko()
-    {
-        Player playerIndex =
-            ConvertIntToPlayerIndex(GetPlayerId());
-
-        GetPlayerChar(playerIndex, &g_Niko);
-    }
-
-    static void DestroySpiritCamera()
-    {
-        if (!g_SpiritCameraCreated)
-            return;
-
-        if (DoesCamExist(g_SpiritCamera))
+        if (m_Player == 0)
         {
-            SetCamActive(g_SpiritCamera, false);
-            DestroyCam(g_SpiritCamera);
+            m_Player = ConvertIntToPlayerIndex(GetPlayerId());
         }
 
-        g_SpiritCamera = {};
-        g_SpiritCameraCreated = false;
-    }
+        GetPlayerChar(m_Player, &m_Niko);
 
-    static bool CreateSpiritCamera()
-    {
-        DestroySpiritCamera();
-
-        g_SpiritCamera = {};
-
-        CreateCam(14, &g_SpiritCamera);
-
-        if (!DoesCamExist(g_SpiritCamera))
-        {
-            LogInfo("TGHMod: CreateCam failed");
-            g_SpiritCamera = {};
-            return false;
-        }
-
-        g_SpiritCameraCreated = true;
-
-        SetCamPos(
-            g_SpiritCamera,
-            g_SpiritX,
-            g_SpiritY,
-            g_SpiritZ
-        );
-
-        SetCamRot(
-            g_SpiritCamera,
-            0.0f,
-            0.0f,
-            g_SpiritYaw
-        );
-
-        SetCamFov(g_SpiritCamera, 70.0f);
-        SetCamPropagate(g_SpiritCamera, true);
-        SetCamActive(g_SpiritCamera, true);
-
-        return true;
-    }
-
-    static void StartSpiritMode()
-    {
-        if (g_Mode != TGH_NORMAL)
+        if (!DoesCharExist(m_Niko))
             return;
 
-        GetNiko();
-
-        if (!IsPedUsable(g_Niko))
+        /*
+         * T:
+         * Niko -> Spirit
+         * Possessed -> Spirit
+         */
+        if ((GetAsyncKeyState('T') & 1) != 0)
         {
-            LogInfo("TGHMod: Niko is not available");
-            return;
+            if (m_Mode == MODE_NIKO)
+            {
+                EnterSpirit();
+            }
+            else if (m_Mode == MODE_POSSESSED)
+            {
+                LeavePossessedToSpirit();
+            }
         }
 
+        /*
+         * G:
+         * Spirit -> nearby NPC
+         */
+        if ((GetAsyncKeyState('G') & 1) != 0)
+        {
+            if (m_Mode == MODE_SPIRIT)
+            {
+                PossessNearestPed();
+            }
+        }
+
+        /*
+         * H:
+         * Spirit / Possessed -> Niko
+         */
+        if ((GetAsyncKeyState('H') & 1) != 0)
+        {
+            if (m_Mode != MODE_NIKO)
+            {
+                ReturnToNiko();
+            }
+        }
+
+        if (m_Mode == MODE_SPIRIT)
+        {
+            UpdateSpirit();
+        }
+        else if (m_Mode == MODE_POSSESSED)
+        {
+            UpdatePossessed();
+        }
+    }
+
+    virtual void OnKill()
+    {
+        RestoreEverything();
+    }
+
+private:
+
+    void CreateCamera()
+    {
+        if (m_CameraCreated)
+            return;
+
+        m_Camera = {};
+
+        CreateCam(14, &m_Camera);
+
+        if (DoesCamExist(m_Camera))
+        {
+            SetCamFov(m_Camera, 65.0f);
+            SetCamPropagate(m_Camera, true);
+            SetCamActive(m_Camera, true);
+
+            m_CameraCreated = true;
+        }
+    }
+
+    void DestroyCamera()
+    {
+        if (!m_CameraCreated)
+            return;
+
+        if (DoesCamExist(m_Camera))
+        {
+            SetCamActive(m_Camera, false);
+            SetCamPropagate(m_Camera, false);
+            DestroyCam(m_Camera);
+        }
+
+        m_Camera = {};
+        m_CameraCreated = false;
+    }
+
+    void EnterSpirit()
+    {
+        m_Mode = MODE_SPIRIT;
+
+        /*
+         * Completely stop Niko.
+         */
+        FreezeCharPosition(m_Niko, true);
+        ClearCharTasksImmediately(m_Niko);
+
+        /*
+         * Remove player control.
+         */
+        SetPlayerControl(m_Player, false);
+        SetCameraControlsDisabledWithPlayerControls(false);
+
+        /*
+         * Start camera above Niko.
+         */
         f32 x;
         f32 y;
         f32 z;
         f32 heading;
 
-        GetCharCoordinates(g_Niko, &x, &y, &z);
-        GetCharHeading(g_Niko, &heading);
+        GetCharCoordinates(m_Niko, &x, &y, &z);
+        GetCharHeading(m_Niko, &heading);
 
-        g_SpiritX = x;
-        g_SpiritY = y;
-        g_SpiritZ = z + 1.5f;
-        g_SpiritYaw = heading;
+        m_SpiritYaw = heading;
+        m_SpiritPitch = -25.0f;
 
-        FreezeCharPosition(g_Niko, true);
+        CreateCamera();
 
-        if (!CreateSpiritCamera())
-        {
-            FreezeCharPosition(g_Niko, false);
+        if (!m_CameraCreated)
             return;
+
+        UpdateSpiritCamera(x, y, z);
+    }
+
+    void UpdateSpirit()
+    {
+        /*
+         * Q / E rotate spirit camera.
+         */
+        if (GetAsyncKeyState('Q') & 0x8000)
+        {
+            m_SpiritYaw -= 2.5f;
         }
 
-        g_Mode = TGH_SPIRIT;
+        if (GetAsyncKeyState('E') & 0x8000)
+        {
+            m_SpiritYaw += 2.5f;
+        }
 
-        LogInfo("TGHMod: Spirit mode started");
-    }
+        if (m_SpiritYaw < 0.0f)
+            m_SpiritYaw += 360.0f;
 
-    static void UpdateSpiritMode()
-    {
-        if (!IsPedUsable(g_Niko))
-            return;
-
-        if (!g_SpiritCameraCreated)
-            return;
-
-        if (IsKeyPressed('Q'))
-            g_SpiritYaw -= 2.0f;
-
-        if (IsKeyPressed('E'))
-            g_SpiritYaw += 2.0f;
-
-        if (g_SpiritYaw >= 360.0f)
-            g_SpiritYaw -= 360.0f;
-
-        if (g_SpiritYaw < 0.0f)
-            g_SpiritYaw += 360.0f;
-
-        SetCamPos(
-            g_SpiritCamera,
-            g_SpiritX,
-            g_SpiritY,
-            g_SpiritZ
-        );
-
-        SetCamRot(
-            g_SpiritCamera,
-            0.0f,
-            0.0f,
-            g_SpiritYaw
-        );
-    }
-
-    static bool FindNearbyPed(Ped *result)
-    {
-        if (result == 0)
-            return false;
-
-        *result = {};
-
-        GetNiko();
-
-        if (!IsPedUsable(g_Niko))
-            return false;
+        if (m_SpiritYaw >= 360.0f)
+            m_SpiritYaw -= 360.0f;
 
         f32 x;
         f32 y;
         f32 z;
 
-        GetCharCoordinates(g_Niko, &x, &y, &z);
+        GetCharCoordinates(m_Niko, &x, &y, &z);
 
-        Ped target = {};
+        UpdateSpiritCamera(x, y, z);
+    }
 
-        bool found = GetClosestChar(
+    void UpdateSpiritCamera(f32 x, f32 y, f32 z)
+    {
+        if (!m_CameraCreated)
+            return;
+
+        const f32 DEG_TO_RAD = 3.14159265358979323846f / 180.0f;
+
+        f32 yaw = m_SpiritYaw * DEG_TO_RAD;
+
+        /*
+         * Camera is behind and above Niko.
+         */
+        const f32 distance = 5.0f;
+        const f32 height = 4.0f;
+
+        f32 camX = x - std::sin(yaw) * distance;
+        f32 camY = y - std::cos(yaw) * distance;
+        f32 camZ = z + height;
+
+        SetCamPos(
+            m_Camera,
+            camX,
+            camY,
+            camZ
+        );
+
+        SetCamRot(
+            m_Camera,
+            m_SpiritPitch,
+            0.0f,
+            m_SpiritYaw
+        );
+
+        SetCamActive(m_Camera, true);
+        SetCamPropagate(m_Camera, true);
+    }
+
+    void PossessNearestPed()
+    {
+        f32 x;
+        f32 y;
+        f32 z;
+
+        GetCharCoordinates(m_Niko, &x, &y, &z);
+
+        Ped nearest = {};
+
+        /*
+         * Search for a nearby pedestrian.
+         */
+        if (!GetClosestChar(
             x,
             y,
             z,
-            8.0f,
+            4.0f,
             false,
             false,
-            &target
-        );
-
-        if (!found)
-            return false;
-
-        if (!IsPedUsable(target))
-            return false;
-
-        if (target == g_Niko)
-            return false;
-
-        *result = target;
-        return true;
-    }
-
-    static void StartPossession()
-    {
-        if (g_Mode != TGH_SPIRIT)
-            return;
-
-        Ped target = {};
-
-        if (!FindNearbyPed(&target))
+            &nearest))
         {
-            LogInfo("TGHMod: no nearby NPC found");
             return;
         }
 
-        g_PossessedPed = target;
+        if (!DoesCharExist(nearest))
+            return;
 
-        SetCharAsMissionChar(g_PossessedPed);
+        /*
+         * Do not possess Niko himself.
+         */
+        if (nearest == m_Niko)
+            return;
 
-        SetBlockingOfNonTemporaryEvents(
-            g_PossessedPed,
-            true
-        );
+        /*
+         * Do not possess dead peds.
+         */
+        if (IsCharDead(nearest))
+            return;
 
+        /*
+         * Save target.
+         */
+        m_Target = nearest;
+
+        /*
+         * Give this ped to the script.
+         */
+        SetCharAsMissionChar(m_Target);
+        SetBlockingOfNonTemporaryEvents(m_Target, true);
+
+        /*
+         * Immediately enter ragdoll.
+         *
+         * 1800 ms = 1.8 seconds.
+         */
         SwitchPedToRagdoll(
-            g_PossessedPed,
-            1800,
-            1800,
+            m_Target,
             0,
-            true,
-            true,
-            false
+            1800,
+            1,
+            1,
+            0,
+            0
         );
 
-        g_RagdollEndTime = GetTickCount() + 1800;
+        m_RagdollEndTime = GetTickCount() + 1800;
 
-        g_Mode = TGH_POSSESSED;
+        /*
+         * Niko remains frozen.
+         */
+        FreezeCharPosition(m_Niko, true);
+        SetPlayerControl(m_Player, false);
 
-        DestroySpiritCamera();
+        /*
+         * Camera follows possessed ped.
+         */
+        CreateCamera();
 
-        LogInfo("TGHMod: possession started");
+        if (m_CameraCreated)
+        {
+            SetCamTargetPed(m_Camera, m_Target);
+            SetCamActive(m_Camera, true);
+            SetCamPropagate(m_Camera, true);
+            SetCamFov(m_Camera, 65.0f);
+        }
+
+        m_Mode = MODE_POSSESSED;
     }
 
-    static void UpdatePossessedMovement()
+    void UpdatePossessed()
     {
-        if (!IsPedUsable(g_PossessedPed))
+        if (!DoesCharExist(m_Target))
         {
-            g_PossessedPed = {};
-            g_Mode = TGH_NORMAL;
+            ReturnToNiko();
             return;
         }
 
-        if (GetTickCount() < g_RagdollEndTime)
+        if (IsCharDead(m_Target))
+        {
+            ReturnToNiko();
+            return;
+        }
+
+        /*
+         * Wait until the 1.8 second possession/ragdoll animation
+         * has completed.
+         */
+        if (GetTickCount() < m_RagdollEndTime)
             return;
 
-        if (IsPedRagdoll(g_PossessedPed))
+        /*
+         * Make the ped controllable again.
+         */
+        SwitchPedToAnimated(m_Target, true);
+
+        /*
+         * WASD movement.
+         */
+        f32 x;
+        f32 y;
+        f32 z;
+
+        GetCharCoordinates(m_Target, &x, &y, &z);
+
+        f32 camPitch;
+        f32 camRoll;
+        f32 camYaw;
+
+        camYaw = 0.0f;
+
+        if (m_CameraCreated && DoesCamExist(m_Camera))
         {
-            SwitchPedToAnimated(
-                g_PossessedPed,
-                true
+            GetCamRot(
+                m_Camera,
+                &camPitch,
+                &camRoll,
+                &camYaw
             );
         }
 
-        f32 forward = 0.0f;
-        f32 right = 0.0f;
+        const f32 DEG_TO_RAD =
+            3.14159265358979323846f / 180.0f;
 
-        if (IsKeyPressed(KEY_FORWARD))
-            forward += 1.0f;
+        f32 yaw = camYaw * DEG_TO_RAD;
 
-        if (IsKeyPressed(KEY_BACK))
-            forward -= 1.0f;
+        /*
+         * GTA heading:
+         * forward = (-sin(yaw), cos(yaw))
+         */
+        f32 forwardX = -std::sin(yaw);
+        f32 forwardY =  std::cos(yaw);
 
-        if (IsKeyPressed(KEY_RIGHT))
-            right += 1.0f;
+        f32 rightX = std::cos(yaw);
+        f32 rightY = std::sin(yaw);
 
-        if (IsKeyPressed(KEY_LEFT))
-            right -= 1.0f;
+        f32 moveX = 0.0f;
+        f32 moveY = 0.0f;
 
-        if (forward == 0.0f && right == 0.0f)
+        if (GetAsyncKeyState('W') & 0x8000)
         {
-            SetCharVelocity(
-                g_PossessedPed,
-                0.0f,
-                0.0f,
-                0.0f
-            );
-            return;
+            moveX += forwardX;
+            moveY += forwardY;
         }
 
-        Camera gameCamera = {};
+        if (GetAsyncKeyState('S') & 0x8000)
+        {
+            moveX -= forwardX;
+            moveY -= forwardY;
+        }
 
-        GetGameCam(&gameCamera);
+        if (GetAsyncKeyState('D') & 0x8000)
+        {
+            moveX += rightX;
+            moveY += rightY;
+        }
 
-        f32 angleX;
-        f32 angleY;
-        f32 angleZ;
-
-        GetCamRot(
-            gameCamera,
-            &angleX,
-            &angleY,
-            &angleZ
-        );
-
-        const f32 PI = 3.14159265358979323846f;
-        const f32 radians = angleZ * PI / 180.0f;
-
-        f32 dirX = cosf(radians);
-        f32 dirY = sinf(radians);
-
-        f32 sideX = -sinf(radians);
-        f32 sideY = cosf(radians);
-
-        f32 moveX =
-            dirX * forward +
-            sideX * right;
-
-        f32 moveY =
-            dirY * forward +
-            sideY * right;
+        if (GetAsyncKeyState('A') & 0x8000)
+        {
+            moveX -= rightX;
+            moveY -= rightY;
+        }
 
         f32 length =
-            sqrtf(
+            std::sqrt(
                 moveX * moveX +
                 moveY * moveY
             );
@@ -373,113 +460,231 @@ namespace
         {
             moveX /= length;
             moveY /= length;
+
+            /*
+             * Normal speed.
+             */
+            f32 speed = 0.055f;
+
+            /*
+             * Shift = run.
+             */
+            if (GetAsyncKeyState(VK_SHIFT) & 0x8000)
+            {
+                speed = 0.105f;
+            }
+
+            x += moveX * speed;
+            y += moveY * speed;
+
+            SetCharCoordinates(
+                m_Target,
+                x,
+                y,
+                z
+            );
+
+            /*
+             * Face movement direction.
+             */
+            f32 heading;
+
+            GetHeadingFromVector2D(
+                moveX,
+                moveY,
+                &heading
+            );
+
+            SetCharHeading(
+                m_Target,
+                heading
+            );
+        }
+    }
+
+    void LeavePossessedToSpirit()
+    {
+        if (DoesCharExist(m_Target))
+        {
+            SwitchPedToAnimated(m_Target, true);
+            SetBlockingOfNonTemporaryEvents(
+                m_Target,
+                false
+            );
+
+            MarkCharAsNoLongerNeeded(&m_Target);
         }
 
-        f32 speed = 1.5f;
+        m_Target = {};
 
-        if (IsKeyPressed(KEY_RUN))
-            speed = 3.0f;
+        m_Mode = MODE_SPIRIT;
 
-        SetCharVelocity(
-            g_PossessedPed,
-            moveX * speed,
-            moveY * speed,
-            0.0f
-        );
+        FreezeCharPosition(m_Niko, true);
+        SetPlayerControl(m_Player, false);
 
+        f32 x;
+        f32 y;
+        f32 z;
         f32 heading;
 
-        GetHeadingFromVector2D(
-            moveX,
-            moveY,
+        GetCharCoordinates(
+            m_Niko,
+            &x,
+            &y,
+            &z
+        );
+
+        GetCharHeading(
+            m_Niko,
             &heading
         );
 
-        SetCharHeading(
-            g_PossessedPed,
-            heading
+        m_SpiritYaw = heading;
+        m_SpiritPitch = -25.0f;
+
+        CreateCamera();
+
+        UpdateSpiritCamera(
+            x,
+            y,
+            z
         );
     }
 
-    static void ReturnToNiko()
+    void ReturnToNiko()
     {
-        if (g_Mode == TGH_NORMAL)
-            return;
-
-        DestroySpiritCamera();
-
-        if (IsPedUsable(g_PossessedPed))
+        /*
+         * Release possessed NPC.
+         */
+        if (DoesCharExist(m_Target))
         {
-            SetCharVelocity(
-                g_PossessedPed,
-                0.0f,
-                0.0f,
-                0.0f
-            );
-
-            ClearCharTasks(g_PossessedPed);
+            SwitchPedToAnimated(m_Target, true);
 
             SetBlockingOfNonTemporaryEvents(
-                g_PossessedPed,
+                m_Target,
+                false
+            );
+
+            MarkCharAsNoLongerNeeded(&m_Target);
+        }
+
+        m_Target = {};
+
+        /*
+         * Destroy custom camera.
+         */
+        DestroyCamera();
+
+        /*
+         * Restore Niko.
+         */
+        if (DoesCharExist(m_Niko))
+        {
+            FreezeCharPosition(
+                m_Niko,
+                false
+            );
+
+            SetCharVisible(
+                m_Niko,
+                true
+            );
+
+            ClearCharTasksImmediately(
+                m_Niko
+            );
+
+            SetCamBehindPed(
+                m_Niko
+            );
+        }
+
+        SetCameraControlsDisabledWithPlayerControls(false);
+
+        SetPlayerControl(
+            m_Player,
+            true
+        );
+
+        m_Mode = MODE_NIKO;
+    }
+
+    void RestoreEverything()
+    {
+        if (DoesCharExist(m_Target))
+        {
+            SwitchPedToAnimated(m_Target, true);
+
+            SetBlockingOfNonTemporaryEvents(
+                m_Target,
                 false
             );
 
             MarkCharAsNoLongerNeeded(
-                &g_PossessedPed
+                &m_Target
             );
         }
 
-        g_PossessedPed = {};
+        m_Target = {};
 
-        GetNiko();
+        DestroyCamera();
 
-        if (IsPedUsable(g_Niko))
+        if (DoesCharExist(m_Niko))
         {
             FreezeCharPosition(
-                g_Niko,
+                m_Niko,
                 false
             );
 
-            SetCamBehindPed(g_Niko);
+            SetCharVisible(
+                m_Niko,
+                true
+            );
         }
 
-        g_Mode = TGH_NORMAL;
+        if (m_Player != 0)
+        {
+            SetCameraControlsDisabledWithPlayerControls(false);
+            SetPlayerControl(m_Player, true);
+        }
 
-        LogInfo("TGHMod: returned to Niko");
+        m_Mode = MODE_NIKO;
     }
-}
+};
 
-void CustomThread::RunTick()
+
+/*
+ * This is the only global thread object.
+ *
+ * No CustomThread.h
+ * No CustomThread.cpp
+ * No Main.cpp
+ */
+static TGHThread g_TGHThread;
+
+
+BOOL APIENTRY DllMain(
+    HANDLE hModule,
+    DWORD fdwReason,
+    LPVOID lpReserved
+)
 {
-    GetNiko();
-
-    if (IsKeyJustPressed(KEY_RETURN))
+    switch (fdwReason)
     {
-        ReturnToNiko();
-        return;
+    case DLL_PROCESS_ATTACH:
+        DisableThreadLibraryCalls(
+            (HMODULE)hModule
+        );
+
+        ScriptHookManager::RegisterThread(
+            &g_TGHThread
+        );
+
+        break;
+
+    case DLL_PROCESS_DETACH:
+        break;
     }
 
-    if (g_Mode == TGH_NORMAL)
-    {
-        if (IsKeyJustPressed(KEY_SPIRIT))
-            StartSpiritMode();
-
-        return;
-    }
-
-    if (g_Mode == TGH_SPIRIT)
-    {
-        UpdateSpiritMode();
-
-        if (IsKeyJustPressed(KEY_POSSESS))
-            StartPossession();
-
-        return;
-    }
-
-    if (g_Mode == TGH_POSSESSED)
-    {
-        UpdatePossessedMovement();
-        return;
-    }
+    return TRUE;
 }
