@@ -1,0 +1,30 @@
+name: Build TGHMod ASI
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup MSVC
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x86
+
+    - name: Compile TGHMod.cpp
+      shell: cmd
+      run: |
+        cl /LD /EHsc /I. /IScriptHook /Fe:TGHMod.dll TGHMod.cpp ScriptHook.lib /link /OUT:TGHMod.dll
+
+    - name: Upload ASI Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: TGHMod-asi
+        path: TGHMod.dll
