@@ -1,28 +1,17 @@
 name: Build TGHMod
-
 on:
+  push:
+    branches: [ main ]
   workflow_dispatch:
-
 jobs:
   build:
-
-    runs-on: windows-2019
-
+    runs-on: windows-latest
     steps:
-
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
-
-      - name: Build
-        run: msbuild ScriptHook.sln /p:Configuration=Release /p:Platform=Win32
-
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: TGHMod
-          path: |
-            **/TGHMod.dll
-            **/TGHMod.asi
+    - uses: actions/checkout@v4
+    - name: Setup MSVC
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x86
+    - name: Compile TGHMod
+      shell: cmd
+      run: cl /LD /EHsc /I. /IScriptHook TGHMod.cpp /link /OUT:TGHMod.dll
