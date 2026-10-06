@@ -9,7 +9,7 @@
 
 #include <windows.h>
 #include <cmath>
-#include "ScriptHook.h"
+#include "ScriptHookManager.h"
 #include "Scripting.h"
 
 using namespace Scripting;
