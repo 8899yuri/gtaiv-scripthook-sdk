@@ -1,17 +1,35 @@
 name: Build TGHMod
+
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
+
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2019
+
     steps:
-    - uses: actions/checkout@v4
-    - name: Setup MSVC
-      uses: ilammy/msvc-dev-cmd@v1
-      with:
-        arch: x86
-    - name: Compile TGHMod
-      shell: cmd
-      run: cl /LD /EHsc /I. /IScriptHook TGHMod.cpp /link /OUT:TGHMod.dll
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build ScriptHook
+        run: msbuild ScriptHook.sln /p:Configuration=Release /p:Platform=Win32
+
+      - name: Build TGHMod
+        shell: cmd
+        run: |
+          call "%ProgramFiles(x86)%\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars32.bat"
+          cl /nologo /LD /EHsc /O2 /MT TGHMod.cpp /I ScriptHook /link /LIBPATH:Release ScriptHook.lib /OUT:TGHMod.dll
+
+      - name: Make ASI
+        shell: cmd
+        run: copy /Y TGHMod.dll TGHMod.asi
+
+      - name: Upload ASI
+        uses: actions/upload-artifact@v4
+        with:
+          name: TGHMod
+          path: TGHMod.asi
