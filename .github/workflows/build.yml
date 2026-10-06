@@ -6,23 +6,19 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-
     steps:
-
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
 
-      - name: Build ScriptHook
-        run: msbuild ScriptHook.sln /p:Configuration=Release /p:Platform=Win32
-
-      - name: Build TGHMod
+      - name: Compile TGHMod
         shell: cmd
         run: |
-          call "%ProgramFiles(x86)%\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars32.bat"
-          cl /nologo /LD /EHsc /O2 /MT TGHMod.cpp /I ScriptHook /link /LIBPATH:Release ScriptHook.lib /OUT:TGHMod.dll
+          cl /LD /EHsc /O2 /MT /I. /IScriptHook TGHMod.cpp /link /FORCE:UNRESOLVED /OUT:TGHMod.dll
 
       - name: Make ASI
         shell: cmd
@@ -31,5 +27,5 @@ jobs:
       - name: Upload ASI
         uses: actions/upload-artifact@v4
         with:
-          name: TGHMod
+          name: TGHMod-ASI
           path: TGHMod.asi
