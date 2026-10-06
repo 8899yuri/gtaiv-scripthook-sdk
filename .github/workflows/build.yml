@@ -5,27 +5,43 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2019
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
 
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x86
 
-      - name: Compile TGHMod
+      - name: Build ScriptHook
+        run: |
+          msbuild ScriptHook.sln /t:ScriptHook /p:Configuration=Release /p:Platform=Win32
+
+      - name: Build TGHMod
         shell: cmd
         run: |
-          cl /LD /EHsc /O2 /MT /I. /IScriptHook TGHMod.cpp /link /FORCE:UNRESOLVED /OUT:TGHMod.dll
+          cl /nologo /LD /EHsc /O2 /MT TGHMod.cpp /I ScriptHook /link Release\ScriptHook.lib /OUT:TGHMod.dll
 
       - name: Make ASI
         shell: cmd
-        run: copy /Y TGHMod.dll TGHMod.asi
+        run: |
+          copy /Y TGHMod.dll TGHMod.asi
 
-      - name: Upload ASI
+      - name: Prepare Runtime Files
+        shell: cmd
+        run: |
+          mkdir Runtime
+          copy /Y Release\ScriptHook.dll Runtime\ScriptHook.dll
+          copy /Y TGHMod.asi Runtime\TGHMod.asi
+
+      - name: Upload TGHMod
         uses: actions/upload-artifact@v4
         with:
-          name: TGHMod-ASI
-          path: TGHMod.asi
+          name: TGHMod-Complete
+          path: Runtime
