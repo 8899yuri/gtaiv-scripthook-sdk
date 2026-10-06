@@ -14,21 +14,28 @@ jobs:
         with:
           arch: x86
 
-      - name: Download Full SDK
+      # 1. 自动去网上下载一个原版的ScriptHook.dll (0.4.0)
+      - name: Download ScriptHook.dll
+        shell: powershell
         run: |
-          git clone https://github.com/FoulPlay/GTAIVScriptHook_0.4.0_SDK.git SDK
+          Invoke-WebRequest -Uri "https://github.com/FoulPlay/GTAIVScriptHook_0.4.0_SDK/raw/main/ScriptHook.dll" -OutFile "ScriptHook.dll"
 
-      - name: Compile SDK to get lib
+      # 2. 用 dumpbin 导出函数名，再用 lib 生成 .lib 文件（跳过损坏的.sln！）
+      - name: Generate ScriptHook.lib
+        shell: cmd
         run: |
-          cd SDK
-          msbuild ScriptHook.sln /p:Configuration=Release /p:Platform=Win32
-          cd ..
+          dumpbin /exports ScriptHook.dll > ScriptHook.def
+          powershell -Command "(Get-Content ScriptHook.def) | Select-Object -Skip 19 | Set-Content ScriptHook.def"
+          lib /def:ScriptHook.def /out:ScriptHook.lib /machine:x86
 
+      # 3. 用生成的 .lib 编译你的 TGHMod
       - name: Compile TGHMod
+        shell: cmd
         run: |
-          cl /LD /EHsc /O2 /MT /I. /IScriptHook TGHMod.cpp /link SDK\Release\ScriptHook.lib /OUT:TGHMod.dll
+          cl /LD /EHsc /O2 /MT /I. /IScriptHook TGHMod.cpp /link ScriptHook.lib /OUT:TGHMod.dll
 
       - name: Make ASI
+        shell: cmd
         run: copy /Y TGHMod.dll TGHMod.asi
 
       - name: Upload ASI
